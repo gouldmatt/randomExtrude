@@ -100,10 +100,20 @@ class RandomExtrudeCmd(om.MPxCommand):
 
             selection_it.next()
 
+        # mesh_fn.updateSurface()
+        cmds.sets(mesh_fn.name(), add='initialShadingGroup')
+        cmds.select(mesh_fn.name())
+        mesh_fn.updateSurface()
+        cmds.delete(ch=1)
+
+        cmds.polyMergeVertex(mesh_fn.name(), ch=0)
+        mesh_fn.updateSurface()
+        cmds.select(cl=True)
+
     def redoIt(self):
         pass
 
-    def add_random_extrusions(self, mesh_fn, poly_it, selected_faces):
+    def add_random_extrusions(self, mesh_fn: om.MFnMesh, poly_it, selected_faces):
 
         # to keep track of which faces are already flagged for extrusion
         visited = set(range(0, mesh_fn.numPolygons))
@@ -135,12 +145,11 @@ class RandomExtrudeCmd(om.MPxCommand):
                 offset = random.uniform(0.1, 0.9) * offset_max
                 mesh_fn.extrudeFaces(face_group, translation=extrude_amount*om.MFloatVector(mesh_fn.getPolygonNormal(
                     face_group[0])),  extrudeTogether=True, offset=offset)
+                mesh_fn.updateSurface()
             else:
                 mesh_fn.extrudeFaces(face_group, translation=extrude_amount*om.MFloatVector(mesh_fn.getPolygonNormal(
                     face_group[0])),  extrudeTogether=False)
-
-        mesh_fn.updateSurface()
-        cmds.delete(ch=1)
+                mesh_fn.updateSurface()
 
     def get_face_groups(self, mesh: om.MFnMesh, poly_it: om.MItMeshPolygon, visited: set):
         poly_it.reset()
