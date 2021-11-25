@@ -86,7 +86,7 @@ class RandomExtrudeCmd(om.MPxCommand):
             print(self.MESSAGE_INFORMATION_NO_SELECTION)
             return None
 
-        # TODO: need to perform extra checks here to make sure we have a mesh
+        # TODO: need to perform extra checks here to make sure we have a proper selection
         self.mesh_dag_path = selection_list.getDagPath(0)
 
         self.mesh_fn = om.MFnMesh(self.mesh_dag_path)
@@ -97,9 +97,8 @@ class RandomExtrudeCmd(om.MPxCommand):
         self.output_mesh_transform_obj = self.dag_modifier.createNode(
             'transform')
 
-        visited = set()
         # get the group of faces that will be extruded together
-        self.face_groups = self.get_face_groups(visited)
+        self.face_groups = self.get_face_groups()
 
         self.output_mesh_obj = self.create_extrusions(self.face_groups)
 
@@ -139,6 +138,9 @@ class RandomExtrudeCmd(om.MPxCommand):
         self.dag_modifier.doIt()
 
     def has_edge(self, id, edgeIt: om.MItMeshEdge):
+        """
+        Return if the argument id is contained in the mesh 
+        """
         edgeIt.reset()
         while not edgeIt.isDone():
             if edgeIt.index() == id:
@@ -156,6 +158,7 @@ class RandomExtrudeCmd(om.MPxCommand):
         output_mesh_poly_it = om.MItMeshPolygon(output_mesh_obj)
         output_mesh_edge_it = om.MItMeshEdge(output_mesh_obj)
 
+        # create a set of edges that will be deleted to combine the faces in each face group
         edges_to_delete = set()
         for face_group in face_groups:
 
@@ -171,12 +174,14 @@ class RandomExtrudeCmd(om.MPxCommand):
                     if len(connected_faces) >= 2 and all([(connected_face in face_group) for connected_face in connected_faces]):
                         edges_to_delete.add(edge)
 
+        # delete the edges as long as the edge is still in the mesh
         for edge in edges_to_delete:
             if self.has_edge(edge, output_mesh_edge_it):
                 output_mesh_fn.deleteEdge(edge, modifier=self.dag_modifier)
 
         output_mesh_poly_it.reset()
 
+        # perform the extrusion randomly based on arguments
         while not output_mesh_poly_it.isDone():
             if self.thickness_range_set:
                 extrude_amount = random.uniform(
@@ -212,7 +217,12 @@ class RandomExtrudeCmd(om.MPxCommand):
     def undoIt(self):
         self.dag_modifier.undoIt()
 
-    def get_face_groups(self, visited: set):
+    def get_face_groups(self):
+        """
+        Create the groups of faces that will be extruded together. 
+        """
+        visited = set()
+
         self.poly_it.reset()
         face_groups = []
 
@@ -227,16 +237,16 @@ class RandomExtrudeCmd(om.MPxCommand):
     def get_nearby_faces(self, visited: set):
         nearby_faces = [self.poly_it.index()]
         visited.add(self.poly_it.index())
-        face_count = 1
 
         connected_faces = self.poly_it.getConnectedFaces()
         valid_faces = self.extract_valid_faces(
-            nearby_faces[0], visited, connected_faces, face_count)
+            nearby_faces[0], visited, connected_faces)
         nearby_faces = nearby_faces + valid_faces
 
         return(nearby_faces)
 
-    def extract_valid_faces(self, start, visited, connected_faces, face_count):
+    def extract_valid_faces(self, start, visited, connected_faces):
+        face_count = 1
         valid_faces = []
         for face in connected_faces:
             if face_count > self.max_face_together:
