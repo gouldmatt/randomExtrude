@@ -4,7 +4,7 @@ A (work in progress) Maya plugin command for creating random extrusions using th
 #### Some examples: 
 
 <img src="images/random_extrude_examples.png" width="700" />
-
+<img src="images/example_render.png" width="700" />
 #### <code>randomExtrude</code> arguments:
 - **Thickness range**, -tr -thicknesRange (*float*, *float*) <br>
 The min/max thickness that a group of faces will be extruded 
