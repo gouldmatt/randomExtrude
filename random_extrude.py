@@ -1,6 +1,4 @@
 import maya.api.OpenMaya as om
-import maya.cmds as cmds
-import maya.mel as mel
 import random
 import math
 
@@ -10,6 +8,9 @@ def maya_useNewAPI():
     Tell Maya this plugin uses the python API 2.0
     """
     pass
+
+
+command_instance_counter = 1
 
 
 class RandomExtrudeCmd(om.MPxCommand):
@@ -23,6 +24,14 @@ class RandomExtrudeCmd(om.MPxCommand):
 
     def __init__(self):
         super(RandomExtrudeCmd, self).__init__()
+
+        # to track number of times the command is instantiated
+        global command_instance_counter
+        self.command_execution = command_instance_counter
+        command_instance_counter = command_instance_counter + 1
+
+    def isUndoable(self):
+        return True
 
     @ classmethod
     def creator(cls):
@@ -45,6 +54,9 @@ class RandomExtrudeCmd(om.MPxCommand):
         return syntax
 
     def doIt(self, args):
+        ''' Parse arguments and set up main objects used in the command. '''
+        self.dag_modifier = om.MDagModifier()
+
         # parse  the arguments
         try:
             arg_db = om.MArgDatabase(self.syntax(), args)
@@ -71,133 +83,173 @@ class RandomExtrudeCmd(om.MPxCommand):
         selection_list = om.MGlobal.getActiveSelectionList()
         if selection_list.isEmpty():
             # RuntimeWarning(self.MESSAGE_INFORMATION_NO_SELECTION)
-            print("No selection")
+            print(self.MESSAGE_INFORMATION_NO_SELECTION)
             return None
 
-        selection_it = om.MItSelectionList(selection_list)
+        # TODO: need to perform extra checks here to make sure we have a mesh
+        self.mesh_dag_path = selection_list.getDagPath(0)
 
-        while not selection_it.isDone():
-            obj = selection_it.getDependNode()
+        self.mesh_fn = om.MFnMesh(self.mesh_dag_path)
+        self.poly_it = om.MItMeshPolygon(self.mesh_dag_path)
 
-            # get the face iterator and mesh functions then make call to create the extrusions
-            if selection_it.hasComponents():
-                dag_components, obj_components = selection_it.getComponent()
+        self.mesh_points = self.mesh_fn.getPoints()
 
-                mesh_fn = om.MFnMesh(dag_components)
-                poly_it = om.MItMeshPolygon(dag_components, obj_components)
+        self.output_mesh_transform_obj = self.dag_modifier.createNode(
+            'transform')
 
-                faces = []
-                while not poly_it.isDone():
-                    faces.append(int(poly_it.index()))
-                    poly_it.next()
-            else:
-                dag = selection_it.getDagPath()
-                mesh_fn = om.MFnMesh(dag)
-                poly_it = om.MItMeshPolygon(dag)
-                faces = range(0, mesh_fn.numPolygons)
+        visited = set()
+        # get the group of faces that will be extruded together
+        self.face_groups = self.get_face_groups(visited)
 
-            self.add_random_extrusions(mesh_fn, poly_it, faces)
+        self.output_mesh_obj = self.create_extrusions(self.face_groups)
 
-            selection_it.next()
+        # Create the shading node.
+        self.shading_node_name = 'randomExtrudeMaterial' + \
+            str(self.command_execution)
+        self.dag_modifier.commandToExecute(
+            'shadingNode -asShader -name ' + self.shading_node_name + ' lambert;')
+        self.dag_modifier.commandToExecute(
+            'setAttr "' + self.shading_node_name + '.color" -type double3 0.5 0.5 0.5;')
 
-        # mesh_fn.updateSurface()
-        cmds.sets(mesh_fn.name(), add='initialShadingGroup')
-        cmds.select(mesh_fn.name())
-        mesh_fn.updateSurface()
-        cmds.delete(ch=1)
+        # Create the shading group.
+        self.shading_group_name = 'randomExtrudeGroup' + \
+            str(self.command_execution)
+        self.dag_modifier.commandToExecute(
+            'sets -renderable true -noSurfaceShader true -empty -name ' + self.shading_group_name + ';')
+        self.dag_modifier.commandToExecute(
+            'connectAttr -f ' + self.shading_node_name + '.outColor ' + self.shading_group_name + '.surfaceShader;')
 
-        cmds.polyMergeVertex(mesh_fn.name(), ch=0)
-        mesh_fn.updateSurface()
-        cmds.select(cl=True)
+        self.redoIt()
 
     def redoIt(self):
-        pass
+        self.dag_modifier.doIt()
 
-    def add_random_extrusions(self, mesh_fn: om.MFnMesh, poly_it, selected_faces):
+        mesh_dag_path = om.MDagPath()
+        dag_shape_node_fn = om.MFnDagNode(self.output_mesh_obj)
+        mesh_dag_path = dag_shape_node_fn.getPath()
 
-        # to keep track of which faces are already flagged for extrusion
-        visited = set(range(0, mesh_fn.numPolygons))
+        self.dag_modifier.commandToExecute(
+            'sets -e -forceElement ' + self.shading_group_name + ' ' + mesh_dag_path.fullPathName())
 
-        # to ensure that only the selected faces are extruded
-        visited = visited.difference(selected_faces)
+        self.dag_modifier.doIt()
 
-        # get the group of faces that will be extruded together
-        face_groups = self.get_face_groups(mesh_fn, poly_it, visited)
+        self.dag_modifier.commandToExecute(
+            'delete -ch')
 
+        self.dag_modifier.doIt()
+
+    def has_edge(self, id, edgeIt: om.MItMeshEdge):
+        edgeIt.reset()
+        while not edgeIt.isDone():
+            if edgeIt.index() == id:
+                return True
+            edgeIt.next()
+        return False
+
+    def create_extrusions(self, face_groups):
+        input_mesh_fn = om.MFnMesh(self.mesh_dag_path)
+
+        output_mesh_obj = input_mesh_fn.copy(
+            input_mesh_fn.object(),  parent=self.output_mesh_transform_obj)
+
+        output_mesh_fn = om.MFnMesh(output_mesh_obj)
+        output_mesh_poly_it = om.MItMeshPolygon(output_mesh_obj)
+        output_mesh_edge_it = om.MItMeshEdge(output_mesh_obj)
+
+        edges_to_delete = set()
         for face_group in face_groups:
 
+            for face in face_group:
+                output_mesh_poly_it.setIndex(face)
+
+                edges = output_mesh_poly_it.getEdges()
+                for edge in edges:
+                    output_mesh_edge_it.setIndex(edge)
+
+                    connected_faces = output_mesh_edge_it.getConnectedFaces()
+
+                    if len(connected_faces) >= 2 and all([(connected_face in face_group) for connected_face in connected_faces]):
+                        edges_to_delete.add(edge)
+
+        for edge in edges_to_delete:
+            if self.has_edge(edge, output_mesh_edge_it):
+                output_mesh_fn.deleteEdge(edge, modifier=self.dag_modifier)
+
+        output_mesh_poly_it.reset()
+
+        while not output_mesh_poly_it.isDone():
             if self.thickness_range_set:
                 extrude_amount = random.uniform(
                     self.thickness_range[0], self.thickness_range[1])
             else:
-                extrude_amount = random.uniform(0, 0.1)
+                extrude_amount = random.uniform(0.001, 0.1)
 
-            # determine an upper bound on the offset amount
-            area = 0
-            for face in face_group:
-                poly_it.setIndex(face)
-                area = area + poly_it.getArea()
-
-            offset_max = math.sqrt(area/(len(face_group)))/math.pi
+            offset_max = math.sqrt(output_mesh_poly_it.getArea())/math.pi
 
             # perform the extrusions
             if self.use_offset:
-                offset = random.uniform(0.1, 0.9) * offset_max
-                mesh_fn.extrudeFaces(face_group, translation=extrude_amount*om.MFloatVector(mesh_fn.getPolygonNormal(
-                    face_group[0])),  extrudeTogether=True, offset=offset)
-                mesh_fn.updateSurface()
+                offset = random.uniform(0.1, 0.5) * offset_max
+                output_mesh_fn.extrudeFaces([output_mesh_poly_it.index()], translation=extrude_amount*om.MFloatVector(output_mesh_fn.getPolygonNormal(
+                    output_mesh_poly_it.index())),  extrudeTogether=True, offset=offset)
+                output_mesh_fn.updateSurface()
             else:
-                mesh_fn.extrudeFaces(face_group, translation=extrude_amount*om.MFloatVector(mesh_fn.getPolygonNormal(
-                    face_group[0])),  extrudeTogether=False)
-                mesh_fn.updateSurface()
+                output_mesh_fn.extrudeFaces([output_mesh_poly_it.index()], translation=extrude_amount*om.MFloatVector(output_mesh_fn.getPolygonNormal(
+                    output_mesh_poly_it.index())),  extrudeTogether=True)
+                output_mesh_fn.updateSurface()
 
-    def get_face_groups(self, mesh: om.MFnMesh, poly_it: om.MItMeshPolygon, visited: set):
-        poly_it.reset()
+            output_mesh_poly_it.next()
+
+        input_mesh_fn.setName('randomExtrudeShape' +
+                              str(self.command_execution))
+
+        transformFn = om.MFnTransform(self.output_mesh_transform_obj)
+        transformFn_og_mesh = om.MFnTransform(self.mesh_dag_path)
+        # print(transformFn_og_mesh.translation())
+        transformFn.setTransformation(transformFn_og_mesh.transformation())
+
+        return output_mesh_obj
+
+    def undoIt(self):
+        self.dag_modifier.undoIt()
+
+    def get_face_groups(self, visited: set):
+        self.poly_it.reset()
         face_groups = []
-        while not poly_it.isDone():
+
+        while not self.poly_it.isDone():
             # if the face has not been flagged for extrusion then get random group of nearby faces to extrude with it
-            if poly_it.index() not in visited:
-                face_group = self.get_nearby_faces(mesh, poly_it, visited)
+            if self.poly_it.index() not in visited:
+                face_group = self.get_nearby_faces(visited)
                 face_groups.append(face_group)
-            poly_it.next()
+            self.poly_it.next()
         return(face_groups)
 
-    def get_nearby_faces(self, mesh: om.MFnMesh, poly_it: om.MItMeshPolygon, visited: set):
-        cmds.select(cl=True)
-        cmds.select(mesh.name() + ".f[" + str(poly_it.index()) + "]")
-
-        # tranverse random number of times to expand the nearby faces
-        # TODO: look into translating the mel command
-        for i in range(random.randint(1, 3)):
-            mel.eval('PolySelectTraverse 1')
-
-        selection_list = om.MGlobal.getActiveSelectionList()
-        selection_it = om.MItSelectionList(selection_list)
-
-        dag_components, obj_components = selection_it.getComponent()
-
-        poly_traverse_it = om.MItMeshPolygon(dag_components, obj_components)
-
-        # add the first face
-        nearby_faces = [poly_it.index()]
-        visited.add(poly_it.index())
+    def get_nearby_faces(self, visited: set):
+        nearby_faces = [self.poly_it.index()]
+        visited.add(self.poly_it.index())
         face_count = 1
 
-        # add the remaining faces checkig if they have been visited and if they have a valid dot product
-        while not poly_traverse_it.isDone() and face_count < self.max_face_together:
-            face = poly_traverse_it.index()
+        connected_faces = self.poly_it.getConnectedFaces()
+        valid_faces = self.extract_valid_faces(
+            nearby_faces[0], visited, connected_faces, face_count)
+        nearby_faces = nearby_faces + valid_faces
 
-            # ensure that the face has a similiar normal
-            dot_prod = om.MFloatVector(mesh.getPolygonNormal(
-                face)) * om.MFloatVector(mesh.getPolygonNormal(nearby_faces[0]))
-            if (face not in visited) and dot_prod > 0:
-                nearby_faces.append(face)
+        return(nearby_faces)
+
+    def extract_valid_faces(self, start, visited, connected_faces, face_count):
+        valid_faces = []
+        for face in connected_faces:
+            if face_count > self.max_face_together:
+                break
+
+            dot_prod = om.MFloatVector(self.mesh_fn.getPolygonNormal(
+                face)) * om.MFloatVector(self.mesh_fn.getPolygonNormal(start))
+            if (face not in visited) and dot_prod == 1:
+                valid_faces.append(face)
                 visited.add(face)
                 face_count = face_count + 1
-            poly_traverse_it.next()
 
-        cmds.select(cl=True)
-        return(nearby_faces)
+        return(valid_faces)
 
 
 def initializePlugin(plugin):
