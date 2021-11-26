@@ -174,13 +174,23 @@ class RandomExtrudeCmd(om.MPxCommand):
                     if len(connected_faces) >= 2 and all([(connected_face in face_group) for connected_face in connected_faces]):
                         edges_to_delete.add(edge)
 
-        # delete the edges as long as the edge is still in the mesh
-        for edge in edges_to_delete:
-            if self.has_edge(edge, output_mesh_edge_it):
-                output_mesh_fn.deleteEdge(edge, modifier=self.dag_modifier)
+        if edges_to_delete:
+            selection = om.MSelectionList()
+            # select and delete edges flagged to delete
+            for edge in edges_to_delete:
 
-        output_mesh_poly_it.reset()
+                selection.add(output_mesh_fn.name() +
+                              ".e[" + str(edge) + "]")
 
+            om.MGlobal.setActiveSelectionList(
+                selection, om.MGlobal.kReplaceList)
+
+            self.dag_modifier.commandToExecute(
+                'delete')
+
+            self.dag_modifier.doIt()
+
+        output_mesh_poly_it = om.MItMeshPolygon(output_mesh_obj)
         # perform the extrusion randomly based on arguments
         while not output_mesh_poly_it.isDone():
             if self.thickness_range_set:
@@ -254,7 +264,7 @@ class RandomExtrudeCmd(om.MPxCommand):
 
             dot_prod = om.MFloatVector(self.mesh_fn.getPolygonNormal(
                 face)) * om.MFloatVector(self.mesh_fn.getPolygonNormal(start))
-            if (face not in visited) and dot_prod == 1:
+            if (face not in visited) and dot_prod > 0.5:
                 valid_faces.append(face)
                 visited.add(face)
                 face_count = face_count + 1
