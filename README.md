@@ -16,7 +16,7 @@ The max number of faces to extrude together
 
 #### Installation: 
 
-1. Copy random_extrude.py to Maya's default plug-in path. By default, this is <user's directory>/Documents/maya/<version>/plug-ins.
+1. Copy random_extrude.py to Maya's default plug-in path. By default, this is <user's directory>/Documents/maya/version/plug-ins.
 
 2. Open Maya and load ".py" through the Plug-in Manager (Windows > Settings/Preferences > Plug-in Manager)
 
